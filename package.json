@@ -1,0 +1,20 @@
+{
+  "dependencies": {
+    "@supabase/supabase-js": "^2.48.0",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "feather-ai": "^0.2.1",
+    "file-type": "^20.0.0",
+    "goat-x": "^1.2.0",
+    "shell-quote": "^1.8.2",
+    "zod": "^3.24.1"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "LOG_LEVEL=info bun run src/index.ts | pino-pretty -c -t -l",
+    "dev": "LOG_LEVEL=debug bun --watch run src/index.ts | pino-pretty -c -t -l",
+    "prepublishOnly": "npm run build",
+    "clean": "rm -rf dist",
+    "prepare": "npm run clean && npm run build"
+  }
+}
