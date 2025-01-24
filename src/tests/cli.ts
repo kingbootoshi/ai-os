@@ -8,7 +8,7 @@ import { help } from '../terminal/commands/help';
 import { Feature } from '../terminal/types/feature';
 import InternetFeature from '../features/internet';
 import TwitterFeature from '../features/twitter';
-import NotesFeature from '../features/notes';
+import ExoQueryFeature from '../features/exoquery';
 /**
  * Configuration for CLI test environment
  * Add or remove features as needed for testing
@@ -16,7 +16,7 @@ import NotesFeature from '../features/notes';
 const cliFeatures: Feature[] = [
   InternetFeature,
   TwitterFeature,
-  NotesFeature,
+  ExoQueryFeature,
   // Add other features here
 ];
 

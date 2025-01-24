@@ -5,6 +5,35 @@ import { executeCommand } from './executeCommand';
 import { EventEmitter } from 'events';
 import { registerCommands, generateHelpText } from './commandRegistry';
 
+// supabase logic for storing messages / status
+import {
+  storeTerminalMessage,
+  clearShortTermHistory
+} from '../supabase/functions/terminal/terminalHistory';
+import {
+  createTerminalEntry,
+  updateTerminalResponse,
+  updateTerminalStatus
+} from '../supabase/functions/terminal/terminalEntries';
+
+interface Feature {
+  loadFeatureCommands: () => Promise<any[]>;
+}
+
+interface TerminalCoreOptions {
+  agentName?: string;
+  personality?: string;
+  model?: string;
+  maxActions?: number;
+  actionCooldownMs?: number;
+  features?: Feature[];
+}
+
+export interface TerminalCoreEvents {
+  'loop:iteration': (messages: { userMessage?: { content?: string }, assistantMessage?: { content?: string } }) => Promise<void> | void;
+  'loop:maxActions': (fullHistory: any[]) => Promise<void> | void;
+}
+
 // Define the terminal command tool
 const terminalCommandTool = {
   type: "function" as const,
@@ -31,7 +60,6 @@ const terminalCommandTool = {
     }
   },
   async execute(args: Record<string, any>): Promise<{ result: string }> {
-    logger.debug({ args }, "Executing terminal command");
     try {
       const result = await executeCommand(args.command);
       return { result: result.output };
@@ -41,24 +69,6 @@ const terminalCommandTool = {
     }
   }
 };
-
-interface Feature {
-  loadFeatureCommands: () => Promise<any[]>;
-}
-
-interface TerminalCoreOptions {
-  agentName?: string;
-  personality?: string;
-  model?: string;
-  maxActions?: number;
-  actionCooldownMs?: number;
-  features?: Feature[];
-}
-
-export interface TerminalCoreEvents {
-  'loop:iteration': (messages: { userMessage?: { content?: string }, assistantMessage?: { content?: string } }) => Promise<void> | void;
-  'loop:maxActions': (fullHistory: any[]) => Promise<void> | void;
-}
 
 export class TerminalCore extends EventEmitter {
   private agent!: FeatherAgent;
@@ -73,6 +83,7 @@ export class TerminalCore extends EventEmitter {
     private options: TerminalCoreOptions = {}
   ) {
     super();
+    // initial random sessionId – will be overridden on runLoop()
     this.sessionId = Math.random().toString(36).slice(2);
     this.maxActions = options.maxActions ?? 20;
     this.actionCooldownMs = options.actionCooldownMs ?? 120_000;
@@ -116,10 +127,10 @@ export class TerminalCore extends EventEmitter {
       ## OUTPUT FORMAT
       Use your execute_terminal_command tool to execute commands. You MUST use this tool.`,
       tools: [terminalCommandTool],
-      chainRun: false, // Disable chain running - we'll handle it ourselves
-      autoExecuteTools: false, // Disable auto-execution
-      forceTool: true, // Force the agent to use terminalCommandTool
-      debug: true, // Enable debug GUI
+      chainRun: false, // We'll handle iteration ourselves
+      autoExecuteTools: false, // We'll manually handle function calls
+      forceTool: true,         // Force the agent to use terminalCommandTool every time
+      debug: true,             // Enable debug GUI
       dynamicVariables: {
         terminal_commands: () => generateHelpText(),
         current_timestamp: () => getCurrentTimestamp(),
@@ -137,12 +148,10 @@ export class TerminalCore extends EventEmitter {
    * Returns parsed arguments or throws error if invalid
    */
   private parseFunctionCall(functionCall: { functionName: string, functionArgs: any }) {
-    // Validate function name matches our tool
     if (functionCall.functionName !== 'execute_terminal_command') {
       throw new Error(`Invalid function name: ${functionCall.functionName}`);
     }
 
-    // Parse arguments - handle both string and object formats
     let args: Record<string, any>;
     if (typeof functionCall.functionArgs === 'string') {
       try {
@@ -154,7 +163,6 @@ export class TerminalCore extends EventEmitter {
       args = functionCall.functionArgs;
     }
 
-    // Validate required fields
     const requiredFields = ['thought', 'plan', 'command'];
     for (const field of requiredFields) {
       if (!args[field]) {
@@ -165,15 +173,21 @@ export class TerminalCore extends EventEmitter {
     return args;
   }
 
+  /**
+   * Main loop that runs until maxActions reached, then enters idle mode
+   */
   public async runLoop() {
-    logger.info('Starting TerminalCore run loop');
+    // Start with fresh sessionId each run
+    this.sessionId = crypto.randomUUID();
+    // Mark terminal active
+    await updateTerminalStatus(true);
+    logger.info(`Starting TerminalCore run loop with sessionId=${this.sessionId}`);
 
     while (true) {
       this.actionCount = 0;
       while (this.actionCount < this.maxActions) {
-        // Run the agent - it will return a function call since forceTool is true
+        // Run the agent once
         const agentResult = await this.agent.run();
-
         if (!agentResult.success) {
           logger.error('Agent run failed:', agentResult.error);
           break;
@@ -185,57 +199,72 @@ export class TerminalCore extends EventEmitter {
         }
 
         try {
-          // Parse and validate the function call
           const parsedArgs = this.parseFunctionCall(agentResult.functionCalls[0]);
-          
-          // Log the agent's thought process
-          logger.info({
-            thought: parsedArgs.thought,
-            plan: parsedArgs.plan
-          }, 'Agent reasoning');
-          
-          // Execute the terminal command
-          const result = await terminalCommandTool.execute(parsedArgs);
-          
-          // Add the command output back as a user message with timestamp
-          const userMessage = `${getCurrentTimestamp()} - [TERMINAL LOG]\n\n${result.result}`;
-          this.agent.addUserMessage(userMessage);
+          logger.info({ parsedArgs }, 'Parsed function call arguments');
 
-          // Format the agent's thought process and command into a structured message
+          // Step 1: Insert a new row into terminal_history for the agent's thought, plan, and command
+          const entryId = await createTerminalEntry(
+            this.sessionId,
+            {
+              internal_thought: parsedArgs.thought,
+              plan: parsedArgs.plan,
+              terminal_commands: [{ command: parsedArgs.command }]
+            }
+          );
+
+          // The agent's "assistant" message
           const assistantMessage = `[THOUGHT]\n ${parsedArgs.thought}\n\n[PLAN]\n ${parsedArgs.plan}\n\n[COMMAND]\n ${parsedArgs.command}`;
 
-          logger.info({
-            assistantMessage: assistantMessage,
-            userMessage: userMessage
-          }, 'Loop iteration');
+          // Step 2: Execute the command and store the returned terminal log
+          const commandResult = await terminalCommandTool.execute(parsedArgs);
+          const userMessage = `[${getCurrentTimestamp()} - TERMINAL LOG]\n\n${commandResult.result}`;
 
-          // Emit loop iteration event with agent output
+          // Step 3: Update that same row's terminal_log with the userMessage
+          if (entryId) {
+            await updateTerminalResponse(entryId, userMessage);
+          }
+
+          // Save short-term history
+          await storeTerminalMessage({ role: 'assistant', content: assistantMessage }, this.sessionId);
+          await storeTerminalMessage({ role: 'user', content: userMessage }, this.sessionId);
+
+          logger.info({ assistantMessage, userMessage }, 'Loop iteration complete');
+
+          // Add the terminal output as the next user input for the agent
+          this.agent.addUserMessage(userMessage);
+
           this.emit('loop:iteration', {
             assistantMessage: assistantMessage,
             userMessage: userMessage
-          }); 
-
-          logger.info('Loop iteration complete');
+          });
 
         } catch (error) {
           logger.error({ error }, 'Error processing agent command');
-          // Feed error back to the agent as user message
+          // Feed error back to the agent
           this.agent.addUserMessage(`Error executing command: ${error.message}`);
           break;
         }
 
-        await new Promise((resolve) => setTimeout(resolve, this.actionCooldownMs));
+        // Action done
         this.actionCount++;
+        // Sleep
+        await new Promise((resolve) => setTimeout(resolve, this.actionCooldownMs));
       }
 
-      // Emit max actions reached event
+      // We have hit maxActions, so let's emit the event
       this.emit('loop:maxActions', []);
 
-      // Enter idle mode
-      const idleMinutes = Math.floor(Math.random() * (60 - 30 + 1)) + 30;
-      logger.info(`Entering idle mode for ${idleMinutes} minutes`);
-      await new Promise((resolve) => setTimeout(resolve, idleMinutes * 60 * 1000));
-      logger.info('Resuming active mode');
+      // Clear short-term history at the end of the run
+      await clearShortTermHistory();
+
+      // Mark terminal inactive
+      await updateTerminalStatus(false);
+
+      logger.info(`Max actions reached or loop ended. sessionId=${this.sessionId} going idle...`);
+
+      // Enter idle mode, then break or re-run (depending on design).
+      // For now, let's break after one cycle.
+      break;
     }
   }
 }

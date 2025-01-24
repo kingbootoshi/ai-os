@@ -7,7 +7,7 @@ import { logger } from '../../utils/logger';
 // Map model type shortcuts to their full model names
 const MODEL_MAP = {
   'deepseek': 'deepseek/deepseek-r1',
-  'claude': 'meta-llama/llama-3.3-70b-instruct' // replace this with claude later
+  'claude': 'anthropic/claude-3.5-sonnet:beta'
 } as const;
 
 type ModelType = keyof typeof MODEL_MAP;

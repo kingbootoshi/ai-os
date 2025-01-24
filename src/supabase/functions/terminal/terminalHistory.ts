@@ -1,7 +1,6 @@
 import { logger } from '../../../utils/logger';
 import { supabase } from '../../supabaseClient';
 
-// COME BACK TO THIS SET IT UP WHEN YOU HAVE TERMINAL AGENT CONFIG SET UP
 interface Message {
   role: 'system' | 'assistant' | 'user' | 'function';
   content?: string;
@@ -14,8 +13,11 @@ interface Message {
   runData?: any;
 }
 
-type ValidRole = 'user' | 'assistant' | 'system';
+type ValidRole = 'system' | 'assistant' | 'user';
 
+/**
+ * Stores a single message in short_term_terminal_history unless it's a 'function' role.
+ */
 export async function storeTerminalMessage(
   message: Message,
   sessionId: string
@@ -44,6 +46,9 @@ export async function storeTerminalMessage(
   }
 }
 
+/**
+ * Returns the N most recent messages from short_term_terminal_history in reverse order (oldest first).
+ */
 export async function getShortTermHistory(limit: number = 10): Promise<Message[]> {
   try {
     const { data, error } = await supabase
@@ -69,6 +74,10 @@ export async function getShortTermHistory(limit: number = 10): Promise<Message[]
   }
 }
 
+/**
+ * Clears the entire short_term_terminal_history table.
+ * Typically done after completing a session or hitting max actions.
+ */
 export async function clearShortTermHistory(): Promise<void> {
   try {
     const { error } = await supabase
@@ -86,6 +95,10 @@ export async function clearShortTermHistory(): Promise<void> {
   }
 }
 
+/**
+ * Returns a nicely formatted chunk of the N most recent short-term messages 
+ * for logging or debugging.
+ */
 export async function getFormattedRecentHistory(limit: number = 6): Promise<string> {
   try {
     const { data, error } = await supabase
