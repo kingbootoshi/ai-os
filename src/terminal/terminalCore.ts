@@ -97,8 +97,41 @@ export class TerminalCore extends EventEmitter {
     };
   }
 
-  public async init() {
-    // Load feature commands
+  /**
+   * Parses and validates the function call from agent output
+   * Returns parsed arguments or throws error if invalid
+   */
+  private parseFunctionCall(functionCall: { functionName: string, functionArgs: any }) {
+    if (functionCall.functionName !== 'execute_terminal_command') {
+      throw new Error(`Invalid function name: ${functionCall.functionName}`);
+    }
+
+    let args: Record<string, any>;
+    if (typeof functionCall.functionArgs === 'string') {
+      try {
+        args = JSON.parse(functionCall.functionArgs);
+      } catch (e) {
+        throw new Error('Failed to parse function arguments as JSON');
+      }
+    } else {
+      args = functionCall.functionArgs;
+    }
+
+    const requiredFields = ['thought', 'plan', 'command'];
+    for (const field of requiredFields) {
+      if (!args[field]) {
+        throw new Error(`Missing required field: ${field}`);
+      }
+    }
+
+    return args;
+  }
+
+  /**
+   * Main loop that runs until maxActions reached, then enters idle mode
+   */
+  public async runLoop() {
+    // Load feature commands and initialize agent
     for (const feature of this.features) {
       const cmds = await feature.loadFeatureCommands();
       registerCommands(cmds);
@@ -141,42 +174,7 @@ export class TerminalCore extends EventEmitter {
     });
 
     logger.info('TerminalCore initialized with FeatherAgent and features');
-  }
 
-  /**
-   * Parses and validates the function call from agent output
-   * Returns parsed arguments or throws error if invalid
-   */
-  private parseFunctionCall(functionCall: { functionName: string, functionArgs: any }) {
-    if (functionCall.functionName !== 'execute_terminal_command') {
-      throw new Error(`Invalid function name: ${functionCall.functionName}`);
-    }
-
-    let args: Record<string, any>;
-    if (typeof functionCall.functionArgs === 'string') {
-      try {
-        args = JSON.parse(functionCall.functionArgs);
-      } catch (e) {
-        throw new Error('Failed to parse function arguments as JSON');
-      }
-    } else {
-      args = functionCall.functionArgs;
-    }
-
-    const requiredFields = ['thought', 'plan', 'command'];
-    for (const field of requiredFields) {
-      if (!args[field]) {
-        throw new Error(`Missing required field: ${field}`);
-      }
-    }
-
-    return args;
-  }
-
-  /**
-   * Main loop that runs until maxActions reached, then enters idle mode
-   */
-  public async runLoop() {
     // Start with fresh sessionId each run
     this.sessionId = crypto.randomUUID();
     // Mark terminal active

@@ -11,14 +11,12 @@ async function main() {
   // Initialize TerminalCore with desired options and features
   const core = new TerminalCore({
     agentName: "SatoshAI-v1",
-    personality: "You embody the spirit of Satoshi Nakamoto",
+    personality: "You embody the spirit of Satoshi Nakamoto. Post a tweet using the twitter-tweet command.",
     model: "anthropic/claude-3.5-sonnet:beta",
     maxActions: 10,
     actionCooldownMs: 10000,
     features: [ TwitterFeature, ExoQueryFeature],
   });
-
-  await core.init(); //is this needed? can we remove it ?
 
   // Example of how to set dynamic variables that the agent uses and refreshes every turn
   const externalCurrentSummaries = "Freshly launched";

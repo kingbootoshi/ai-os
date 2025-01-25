@@ -3,6 +3,23 @@ import { getAllCommands, getCommand } from './commandRegistry';
 import { logTerminalOutput } from './terminalLogger';
 import type { CommandParameter } from './types/commands';
 import { logger } from '../utils/logger';
+
+/**
+ * Strips surrounding quotes if the entire string is enclosed in
+ * matching single or double quotes. This helps handle AI-generated
+ * commands with unneeded wrapping quotes.
+ */
+function stripMatchingQuotes(str: string): string {
+  if (!str || str.length < 2) return str;
+  const firstChar = str[0];
+  const lastChar = str[str.length - 1];
+  // If both ends match single or double quote, strip them
+  if ((firstChar === '"' && lastChar === '"') || (firstChar === "'" && lastChar === "'")) {
+    return str.substring(1, str.length - 1);
+  }
+  return str;
+}
+
 /**
  * Parses argument tokens into named parameters based on parameter definitions.
  * Modified: If the parameter name is 'args' and it's the last parameter, we store all leftover tokens as an array.
@@ -33,12 +50,18 @@ function parseArguments(
     if (isLastParam && param.required && (param.type === 'string' || !param.type)) {
       const leftoverTokens = tokens.slice(tokenIndex);
       value = leftoverTokens.join(' ');
+      // Strip outer quotes if present
+      value = stripMatchingQuotes(value);
       args[param.name] = value;
       break;
     }
 
     if (tokenIndex < tokens.length) {
       value = tokens[tokenIndex++];
+      // Also attempt to strip quotes for normal single-parameter usage
+      if (param.type === 'string') {
+        value = stripMatchingQuotes(value);
+      }
     } else if (param.required) {
       throw new Error(`Missing required parameter: ${param.name}`);
     } else if (param.defaultValue !== undefined) {
@@ -71,6 +94,9 @@ function preprocessCommandLine(commandLine: string): string {
   return commandLine;
 }
 
+/**
+ * Executes multiple commands in sequence, bundling their outputs.
+ */
 export async function executeMultipleCommands(
   commands: { command: string }[]
 ): Promise<{
@@ -86,7 +112,7 @@ export async function executeMultipleCommands(
     executedCommands.push(result.command);
   }
 
-  const bundledOutput = executedCommands.map((cmd, index) => 
+  const bundledOutput = executedCommands.map((cmd, index) =>
     `$ ${cmd}\n${outputs[index]}`
   ).join('\n\n');
 
@@ -96,6 +122,9 @@ export async function executeMultipleCommands(
   };
 }
 
+/**
+ * Main function to parse and execute a single command line input.
+ */
 export async function executeCommand(
   commandLine: string
 ): Promise<{
@@ -114,8 +143,8 @@ export async function executeCommand(
 
   const processedCommand = preprocessCommandLine(commandLine.trim());
   const tokens = parse(processedCommand);
-  
-  const unescapedTokens = tokens.map(token => 
+
+  const unescapedTokens = tokens.map(token =>
     typeof token === 'string' ? token.replace(/\\\$/g, '$') : token
   );
 
