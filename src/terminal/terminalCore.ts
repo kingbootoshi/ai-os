@@ -128,7 +128,8 @@ export class TerminalCore extends EventEmitter {
   }
 
   /**
-   * Main loop that runs until maxActions reached, then enters idle mode
+   * Main loop that runs until maxActions is reached, then enters idle mode.
+   * With updated error handling so one bad response won't crash the loop.
    */
   public async runLoop() {
     // Load feature commands and initialize agent
@@ -181,88 +182,91 @@ export class TerminalCore extends EventEmitter {
     await updateTerminalStatus(true);
     logger.info(`Starting TerminalCore run loop with sessionId=${this.sessionId}`);
 
-    while (true) {
-      this.actionCount = 0;
-      while (this.actionCount < this.maxActions) {
-        // Run the agent once
+    // Reset actionCount
+    this.actionCount = 0;
+
+    // Run until we exhaust maxActions
+    while (this.actionCount < this.maxActions) {
+      let iterationError = false;
+
+      try {
+        // 1) Run the agent
         const agentResult = await this.agent.run();
         if (!agentResult.success) {
-          logger.error('Agent run failed:', agentResult.error);
-          break;
+          throw new Error(agentResult.error ?? 'Unknown error in agent run');
         }
 
         if (!agentResult.functionCalls?.length) {
-          logger.error('Agent did not return any function calls');
-          break;
+          throw new Error('Agent did not return any function calls');
         }
 
-        try {
-          const parsedArgs = this.parseFunctionCall(agentResult.functionCalls[0]);
-          logger.info({ parsedArgs }, 'Parsed function call arguments');
+        // 2) Parse function call
+        const parsedArgs = this.parseFunctionCall(agentResult.functionCalls[0]);
+        logger.info({ parsedArgs }, 'Parsed function call arguments');
 
-          // Step 1: Insert a new row into terminal_history for the agent's thought, plan, and command
-          const entryId = await createTerminalEntry(
-            this.sessionId,
-            {
-              internal_thought: parsedArgs.thought,
-              plan: parsedArgs.plan,
-              terminal_commands: [{ command: parsedArgs.command }]
-            }
-          );
-
-          // The agent's "assistant" message
-          const assistantMessage = `[THOUGHT]\n ${parsedArgs.thought}\n\n[PLAN]\n ${parsedArgs.plan}\n\n[COMMAND]\n ${parsedArgs.command}`;
-
-          // Step 2: Execute the command and store the returned terminal log
-          const commandResult = await terminalCommandTool.execute(parsedArgs);
-          const userMessage = `[${getCurrentTimestamp()} - TERMINAL LOG]\n\n${commandResult.result}`;
-
-          // Step 3: Update that same row's terminal_log with the userMessage
-          if (entryId) {
-            await updateTerminalResponse(entryId, userMessage);
+        // 3) Insert a new row into terminal_history for the agent's thought, plan, and command
+        const entryId = await createTerminalEntry(
+          this.sessionId,
+          {
+            internal_thought: parsedArgs.thought,
+            plan: parsedArgs.plan,
+            terminal_commands: [{ command: parsedArgs.command }]
           }
+        );
 
-          // Save short-term history
-          await storeTerminalMessage({ role: 'assistant', content: assistantMessage }, this.sessionId);
-          await storeTerminalMessage({ role: 'user', content: userMessage }, this.sessionId);
+        // The agent's "assistant" message
+        const assistantMessage = `[THOUGHT]\n ${parsedArgs.thought}\n\n[PLAN]\n ${parsedArgs.plan}\n\n[COMMAND]\n ${parsedArgs.command}`;
 
-          logger.info({ assistantMessage, userMessage }, 'Loop iteration complete');
+        // 4) Execute the command and store the returned terminal log
+        const commandResult = await terminalCommandTool.execute(parsedArgs);
+        const userMessage = `[${getCurrentTimestamp()} - TERMINAL LOG]\n\n${commandResult.result}`;
 
-          // Add the terminal output as the next user input for the agent
-          this.agent.addUserMessage(userMessage);
-
-          this.emit('loop:iteration', {
-            assistantMessage: assistantMessage,
-            userMessage: userMessage
-          });
-
-        } catch (error) {
-          logger.error({ error }, 'Error processing agent command');
-          // Feed error back to the agent
-          this.agent.addUserMessage(`Error executing command: ${error.message}`);
-          break;
+        // 5) Update that same row's terminal_log with the userMessage
+        if (entryId) {
+          await updateTerminalResponse(entryId, userMessage);
         }
 
-        // Action done
-        this.actionCount++;
-        // Sleep
-        await new Promise((resolve) => setTimeout(resolve, this.actionCooldownMs));
+        // 6) Save short-term history
+        await storeTerminalMessage({ role: 'assistant', content: assistantMessage }, this.sessionId);
+        await storeTerminalMessage({ role: 'user', content: userMessage }, this.sessionId);
+
+        logger.info({ assistantMessage, userMessage }, 'Loop iteration complete');
+
+        // 7) Add the terminal output as the next user input for the agent
+        this.agent.addUserMessage(userMessage);
+
+        // Emit iteration event
+        this.emit('loop:iteration', {
+          assistantMessage: assistantMessage,
+          userMessage: userMessage
+        });
+      } catch (error: any) {
+        iterationError = true;
+        logger.error({ error }, 'Error occurred during agent iteration');
+
+        // Feed error back to the agent so it can self-correct or handle
+        this.agent.addUserMessage(`Error during iteration: ${error.message}`);
       }
 
-      // We have hit maxActions, so let's emit the event
-      this.emit('loop:maxActions', []);
+      // We increment actionCount regardless of success or error in iteration
+      this.actionCount++;
 
-      // Clear short-term history at the end of the run
-      await clearShortTermHistory();
-
-      // Mark terminal inactive
-      await updateTerminalStatus(false);
-
-      logger.info(`Max actions reached or loop ended. sessionId=${this.sessionId} going idle...`);
-
-      // Enter idle mode, then break or re-run (depending on design).
-      // For now, let's break after one cycle.
-      break;
+      // If there was an error, we continue to the next iteration instead of crashing
+      if (!iterationError) {
+        // Sleep if iteration was successful
+        await new Promise((resolve) => setTimeout(resolve, this.actionCooldownMs));
+      }
     }
+
+    // We have hit maxActions, so let's emit the event
+    this.emit('loop:maxActions', []);
+
+    // Clear short-term history at the end of the run
+    await clearShortTermHistory();
+
+    // Mark terminal inactive
+    await updateTerminalStatus(false);
+
+    logger.info(`Max actions reached or loop ended. sessionId=${this.sessionId} going idle...`);
   }
 }
